@@ -5,6 +5,9 @@ Las ciudades están ordenadas por volumen de negocios esperado, para que las
 primeras opciones sean también las más rentables.
 """
 
+__version__ = "4.0"
+
+
 CITIES: dict[str, list[str]] = {
     "es": [
         "Madrid", "Barcelona", "Valencia", "Sevilla", "Zaragoza", "Málaga", "Murcia",

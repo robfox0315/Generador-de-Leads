@@ -10,7 +10,10 @@ Aviso sobre despliegues en la nube:
     descargar tus datos, o apunta LEADFORGE_DB a un volumen persistente.
 """
 
+
 from __future__ import annotations
+
+__version__ = "4.0"
 
 import os
 import sqlite3

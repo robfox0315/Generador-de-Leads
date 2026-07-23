@@ -12,6 +12,40 @@ from datetime import datetime
 import pandas as pd
 import streamlit as st
 
+APP_VERSION = "4.0"
+
+# --- Comprobación de que todos los módulos están al día -----------------------
+_MISSING: list[str] = []
+try:
+    import lead_engine as _engine
+    if getattr(_engine, "__version__", "0") != APP_VERSION:
+        _MISSING.append("lead_engine.py")
+except ImportError:
+    _MISSING.append("lead_engine.py")
+try:
+    import storage as _storage
+    if getattr(_storage, "__version__", "0") != APP_VERSION:
+        _MISSING.append("storage.py")
+except ImportError:
+    _MISSING.append("storage.py")
+try:
+    import catalog as _catalog
+    if getattr(_catalog, "__version__", "0") != APP_VERSION:
+        _MISSING.append("catalog.py")
+except ImportError:
+    _MISSING.append("catalog.py")
+
+if _MISSING:
+    st.set_page_config(page_title="LeadForge", page_icon="⚡")
+    st.error("### Faltan archivos o están desactualizados")
+    st.markdown(
+        "Estos módulos no están en la versión **%s**:\n\n%s\n\n"
+        "**Solución:** sube al repositorio la versión más reciente de esos archivos "
+        "(todos en la misma carpeta que `app.py`) y pulsa *Reboot app*."
+        % (APP_VERSION, "\n".join(f"- `{m}`" for m in _MISSING))
+    )
+    st.stop()
+
 import storage
 from catalog import SECTORS, all_terms, cities_for
 from lead_engine import (

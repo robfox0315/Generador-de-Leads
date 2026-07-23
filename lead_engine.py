@@ -20,7 +20,10 @@ Correcciones de la auditoría v2:
     · Logging estructurado.
 """
 
+
 from __future__ import annotations
+
+__version__ = "4.0"
 
 import hashlib
 import ipaddress
