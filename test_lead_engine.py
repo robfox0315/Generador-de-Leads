@@ -188,6 +188,173 @@ def test_dedup_and_cache():
 
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Catálogo (selectores)
+# ---------------------------------------------------------------------------
+
+def test_catalog():
+    import catalog
+    es = catalog.cities_for("es")
+    mx = catalog.cities_for("mx")
+    terms = catalog.all_terms()
+    results = [
+        check("España tiene catálogo amplio de ciudades", len(es) >= 70),
+        check("México tiene catálogo de ciudades", len(mx) >= 30),
+        check("Madrid está en España", "Madrid" in es),
+        check("CDMX está en México", "Ciudad de México" in mx),
+        check("País desconocido devuelve lista vacía", catalog.cities_for("zz") == []),
+        check("No hay ciudades duplicadas", len(es) == len(set(es))),
+        check("Hay términos de varios sectores", len(terms) >= 40),
+        check("No hay términos duplicados", len(terms) == len(set(terms))),
+        check("Todos los sectores tienen términos",
+              all(len(v) > 0 for v in catalog.SECTORS.values())),
+    ]
+    return all(results)
+
+
+# ---------------------------------------------------------------------------
+# Pipeline end-to-end con respuestas simuladas (no consume cuota)
+# ---------------------------------------------------------------------------
+
+class _FakeResponse:
+    def __init__(self, payload):
+        self._payload = payload
+    def json(self):
+        return self._payload
+
+
+def _fake_get(payload):
+    def _inner(url, params=None, timeout=None, **kwargs):
+        return _FakeResponse(payload)
+    return _inner
+
+
+def test_pipeline():
+    from unittest.mock import patch
+    sample = {"local_results": [
+        {"title": "CD Tudelano", "phone": "+34 619 71 98 78",
+         "address": "C/ X, 41010 Sevilla, España", "website": "https://cdtudelano.com",
+         "place_id": "abc", "rating": 4.5},
+        {"title": "Gimnasio Fit", "phone": "+34 600 11 22 33",
+         "address": "C/ Y, 41010 Sevilla"},
+        {"title": "CD Tudelano", "phone": "+34 619 71 98 78",
+         "address": "C/ X, 41010 Sevilla"},
+    ]}
+    with patch.object(engine.SESSION, "get", side_effect=_fake_get(sample)):
+        leads, stats = engine.generate_leads("a" * 64, ["Sevilla"], ["club de futbol"],
+                                             use_cache=False, enrich_web=False)
+    results = [
+        check("Extrae los leads válidos", len(leads) == 1),
+        check("Descarta el gimnasio", stats["descartados_no_club"] == 1),
+        check("Detecta el duplicado", stats["duplicados"] == 1),
+        check("Normaliza el teléfono", leads[0].phone_e164 == "34619719878"),
+        check("Deduce la provincia", leads[0].province == "Sevilla"),
+        check("Genera enlace de WhatsApp", leads[0].whatsapp_url.startswith("https://wa.me/")),
+        check("Contabiliza las búsquedas", stats["consumidas"] == 1),
+    ]
+
+    # Sin cuota: no debe romper, debe reportar
+    with patch.object(engine.SESSION, "get",
+                      side_effect=_fake_get({"error": "Your account has run out of searches."})):
+        leads2, stats2 = engine.generate_leads("a" * 64, ["Sevilla"], ["club de futbol"],
+                                               use_cache=False, enrich_web=False)
+    results += [
+        check("Sin cuota no devuelve leads", len(leads2) == 0),
+        check("Sin cuota registra el fallo", stats2["consultas_fallidas"] == 1),
+        check("Sin cuota guarda el mensaje real",
+              "run out" in stats2["errores"][0].lower()),
+    ]
+
+    # Exclusión de contactados previos
+    with patch.object(engine.SESSION, "get", side_effect=_fake_get(sample)):
+        leads3, stats3 = engine.generate_leads(
+            "a" * 64, ["Sevilla"], ["club de futbol"], use_cache=False, enrich_web=False,
+            exclude_keys={engine.normalize_key("CD Tudelano")})
+    results.append(check("Excluye los ya contactados",
+                         len(leads3) == 0 and stats3["ya_contactados"] == 1))
+    return all(results)
+
+
+def test_enrich_from_names():
+    from unittest.mock import patch
+    found = {"local_results": [
+        {"title": "CB Granollers", "phone": "+34 619 71 98 78",
+         "address": "C/ Z, 08400 Granollers", "website": "https://cbgranollers.cat"}]}
+    with patch.object(engine.SESSION, "get", side_effect=_fake_get(found)):
+        leads, stats = engine.enrich_from_names("a" * 64, ["CB Granollers"],
+                                                use_cache=False, enrich_web=False)
+    empty = {"local_results": []}
+    with patch.object(engine.SESSION, "get", side_effect=_fake_get(empty)):
+        leads2, stats2 = engine.enrich_from_names("a" * 64, ["Club Inexistente XYZ"],
+                                                  use_cache=False, enrich_web=False)
+    results = [
+        check("Encuentra el negocio por su nombre", stats["encontrados"] == 1),
+        check("Recupera el teléfono", leads[0].phone_e164 == "34619719878"),
+        check("Conserva el nombre original del archivo", leads[0].query == "CB Granollers"),
+        check("Los no encontrados se devuelven marcados",
+              stats2["no_encontrados"] == 1 and leads2[0].size_hint == "No encontrado en Maps"),
+        check("No inventa teléfono si no lo encuentra", leads2[0].phone_e164 == ""),
+    ]
+    return all(results)
+
+
+# ---------------------------------------------------------------------------
+# Persistencia
+# ---------------------------------------------------------------------------
+
+def test_storage():
+    import os, tempfile, storage
+    db = os.path.join(tempfile.gettempdir(), "lf_suite_test.db")
+    if os.path.exists(db):
+        os.remove(db)
+
+    a = {"name": "CD Tudelano", "sport": "Fútbol", "city": "Sevilla",
+         "phone_e164": "34619719878", "phone_kind": "Móvil", "email": "",
+         "contact_name": "", "website": "https://x.com", "rating": "4.5", "email_type": ""}
+    b = {"name": "CB Granollers", "sport": "Baloncesto", "city": "Granollers",
+         "phone_e164": "34600112233", "phone_kind": "Móvil", "email": "info@cb.com",
+         "email_type": "Genérico", "contact_name": "Marc Puig",
+         "website": "https://cb.com", "rating": "4.8"}
+
+    first = storage.save_leads([a, b], campaign="Test", path=db)
+    second = storage.save_leads([a, b], campaign="Test", path=db)
+    enriched = dict(a, email="info@t.com", contact_name="Ana Ruiz")
+    third = storage.save_leads([enriched], path=db)
+    rows = storage.fetch_leads(path=db)
+    names, phones = storage.known_fingerprints(path=db)
+    moved = storage.update_status([rows[0]["id"]], "Demo agendada", path=db)
+    filtered = storage.fetch_leads(status="Demo agendada", path=db)
+    summary = storage.stats(path=db)
+
+    results = [
+        check("Guarda leads nuevos", first["nuevos"] == 2),
+        check("No duplica en la segunda pasada", second["nuevos"] == 0 and second["duplicados"] == 2),
+        check("Completa huecos con datos nuevos", third["completados"] == 1),
+        check("El email se rellenó al completar",
+              any(r["email"] == "info@t.com" for r in rows)),
+        check("Puntúa mejor al lead completo", storage.score_lead(b) > storage.score_lead(a)),
+        check("Ordena por calidad", rows[0]["score"] >= rows[-1]["score"]),
+        check("Devuelve claves para excluir", len(names) == 2 and len(phones) == 2),
+        check("Cambia el estado", moved == 1 and len(filtered) == 1),
+        check("Calcula métricas", summary["total"] == 2 and summary["con_whatsapp"] == 2),
+        check("Rechaza estados inválidos",
+              _raises(storage.update_status, [rows[0]["id"]], "Inventado", path=db)),
+        check("Huella por teléfono es estable",
+              storage.fingerprint(a) == storage.fingerprint(dict(a, name="Otro nombre"))),
+    ]
+    storage.reset_database(path=db)
+    os.remove(db)
+    return all(results)
+
+
+def _raises(func, *args, **kwargs) -> bool:
+    try:
+        func(*args, **kwargs)
+        return False
+    except Exception:  # noqa: BLE001
+        return True
+
+
 SUITES = [
     ("Teléfonos multi-país", test_phones),
     ("Clasificación y filtros", test_classification),
@@ -197,6 +364,10 @@ SUITES = [
     ("API key y plantillas", test_validation),
     ("Generación de mensajes", test_messages),
     ("Deduplicación y caché", test_dedup_and_cache),
+    ("Catálogo de selectores", test_catalog),
+    ("Pipeline completo (simulado)", test_pipeline),
+    ("Enriquecer desde nombres", test_enrich_from_names),
+    ("Persistencia y CRM", test_storage),
 ]
 
 

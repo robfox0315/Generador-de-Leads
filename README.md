@@ -9,6 +9,15 @@ web, email y responsable — todo extraído de fuentes verificables.
 
 ---
 
+## Cuatro áreas de trabajo
+
+| Pestaña | Para qué |
+|---|---|
+| **Buscar leads** | Encuentra negocios por ciudad y sector con selectores |
+| **Enriquecer mi lista** | Sube un Excel con nombres y recupera sus datos de contacto |
+| **Mi base** | Histórico persistente, embudo comercial y seguimiento de estados |
+| **Guía** | Diagnóstico de problemas y buenas prácticas |
+
 ## Qué hace
 
 | Etapa | Fuente | Resultado |
@@ -91,11 +100,26 @@ Ejemplo: 3 ciudades × 6 términos × 1 página = **18 búsquedas** ≈ 360 nego
 
 ```
 leadforge/
-├── app.py                 Interfaz Streamlit
+├── app.py                 Interfaz Streamlit (4 pestañas)
 ├── lead_engine.py         Motor: búsqueda, normalización, scraping, mensajes
+├── storage.py             Persistencia SQLite, scoring y embudo comercial
+├── catalog.py             Catálogo de ciudades y sectores
+├── test_lead_engine.py    90 comprobaciones automatizadas
 ├── requirements.txt
 └── .streamlit/config.toml Tema
 ```
+
+### Persistencia
+
+Los leads se guardan en SQLite (`leadforge.db`) y se deduplican solos: una búsqueda
+nueva nunca te devuelve algo que ya tengas guardado. Para apuntar a otra ubicación:
+
+```bash
+export LEADFORGE_DB=/ruta/persistente/leadforge.db
+```
+
+En Streamlit Community Cloud el disco es efímero y la base se reinicia con cada
+redespliegue: descarga la copia de seguridad desde la pestaña **Mi base**.
 
 `lead_engine.py` no depende de Streamlit: puede usarse desde un script, un cron
 o una API sin tocar una línea.

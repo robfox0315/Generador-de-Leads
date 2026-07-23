@@ -40,9 +40,21 @@ from typing import Callable, Iterable
 from urllib.parse import quote, urljoin, urlparse
 
 import requests
-from bs4 import BeautifulSoup
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+
+# BeautifulSoup solo hace falta para el enriquecimiento web. Si no está instalado,
+# la app sigue funcionando: se buscan leads igual y se avisa de la limitación.
+try:
+    from bs4 import BeautifulSoup
+    HTML_PARSER_AVAILABLE = True
+except ImportError:  # pragma: no cover
+    BeautifulSoup = None  # type: ignore[assignment]
+    HTML_PARSER_AVAILABLE = False
+    logging.getLogger("leadforge").warning(
+        "beautifulsoup4 no está instalado: el enriquecimiento web queda desactivado. "
+        "Instálalo con: pip install beautifulsoup4"
+    )
 
 logger = logging.getLogger("leadforge")
 if not logger.handlers:
@@ -383,6 +395,9 @@ def scrape_website_contact(website: str, max_pages: int = 3,
                            timeout: int = REQUEST_TIMEOUT) -> WebContact:
     """Extrae email y responsable de la web real. Vacío si no están publicados."""
     result = WebContact()
+    if not HTML_PARSER_AVAILABLE:
+        result.error = "beautifulsoup4 no instalado"
+        return result
     if not website or not is_safe_url(website):
         result.error = "url no válida o no permitida"
         return result
@@ -497,6 +512,124 @@ def validate_api_key(api_key: str) -> tuple[bool, str]:
         return False, (f"La key tiene {len(key)} caracteres y debería tener "
                        f"{SERPAPI_KEY_LENGTH}. Suele deberse a un espacio al copiar.")
     return True, ""
+
+
+def check_account(api_key: str) -> dict:
+    """Consulta el estado de la cuenta de SerpApi: plan y búsquedas restantes."""
+    valid, reason = validate_api_key(api_key)
+    if not valid:
+        return {"ok": False, "error": reason}
+    try:
+        response = SESSION.get("https://serpapi.com/account",
+                               params={"api_key": api_key.strip()},
+                               timeout=REQUEST_TIMEOUT)
+        payload = response.json()
+    except (requests.RequestException, ValueError) as exc:
+        return {"ok": False, "error": f"No se pudo consultar la cuenta: {exc}"}
+
+    if payload.get("error"):
+        return {"ok": False, "error": payload["error"]}
+
+    used = payload.get("this_month_usage", payload.get("searches_per_month", 0))
+    total = payload.get("searches_per_month", 0)
+    left = payload.get("total_searches_left", payload.get("plan_searches_left", 0))
+    return {
+        "ok": True,
+        "plan": payload.get("plan_name", "—"),
+        "used": used,
+        "total": total,
+        "left": left,
+        "email": payload.get("account_email", ""),
+    }
+
+
+def enrich_from_names(
+    api_key: str,
+    names: list[str],
+    country_code: str = "es",
+    location_hint: str = "",
+    enrich_web: bool = True,
+    enrich_workers: int = 8,
+    use_cache: bool = True,
+    max_searches: int = 200,
+    progress: Callable[[float, str], None] | None = None,
+) -> tuple[list[Lead], dict]:
+    """
+    Toma una lista de NOMBRES de negocios y busca cada uno en Google Maps para
+    recuperar teléfono, web, dirección y, si procede, email y responsable.
+    Los nombres no encontrados se devuelven con los campos vacíos y una marca.
+    """
+    valid, reason = validate_api_key(api_key)
+    if not valid:
+        raise SerpApiError(reason)
+    country = COUNTRIES[country_code]
+
+    leads: list[Lead] = []
+    stats = {"buscados": 0, "encontrados": 0, "no_encontrados": 0, "consumidas": 0,
+             "consultas_fallidas": 0, "errores": [], "presupuesto_agotado": False,
+             "webs_visitadas": 0}
+
+    clean_names = [n.strip() for n in dict.fromkeys(names) if n and str(n).strip()]
+    for index, name in enumerate(clean_names, start=1):
+        if stats["consumidas"] >= max_searches:
+            stats["presupuesto_agotado"] = True
+            break
+
+        query = f"{name} {location_hint}".strip()
+        stats["buscados"] += 1
+        try:
+            raw_results, consumed = search_maps(api_key, query, country, 1, use_cache)
+            stats["consumidas"] += consumed
+        except SerpApiError as exc:
+            stats["consultas_fallidas"] += 1
+            stats["errores"].append(f"{name}: {exc}")
+            if "api key" in str(exc).lower() or "run out" in str(exc).lower():
+                raise
+            continue
+
+        if raw_results:
+            lead = build_lead(raw_results[0], country, query)
+            if lead:
+                lead.query = name          # conserva el nombre original del archivo
+                leads.append(lead)
+                stats["encontrados"] += 1
+        else:
+            leads.append(Lead(name=name, country=country.name, query=name,
+                              size_hint="No encontrado en Maps"))
+            stats["no_encontrados"] += 1
+
+        if progress:
+            progress(index / len(clean_names) * 0.7,
+                     f"{name} · {stats['encontrados']} encontrados")
+
+    if enrich_web:
+        targets = [l for l in leads if l.website]
+        done = 0
+        if targets and HTML_PARSER_AVAILABLE:
+            with ThreadPoolExecutor(max_workers=max(1, enrich_workers)) as pool:
+                futures = {pool.submit(scrape_website_contact, l.website): l for l in targets}
+                for future in as_completed(futures):
+                    lead = futures[future]
+                    done += 1
+                    try:
+                        contact = future.result()
+                    except Exception:  # noqa: BLE001
+                        continue
+                    if contact.emails:
+                        lead.email = contact.emails[0]
+                        lead.email_type = ("Genérico" if is_role_account(contact.emails[0])
+                                           else "Personal")
+                        lead.email_source = contact.source_url
+                    lead.contact_name = contact.contact_name
+                    lead.contact_role = contact.contact_role
+                    if progress:
+                        progress(0.7 + done / len(targets) * 0.3,
+                                 f"Enriqueciendo webs · {done}/{len(targets)}")
+        stats["webs_visitadas"] = len(targets)
+
+    if progress:
+        progress(1.0, f"Listo · {stats['encontrados']}/{stats['buscados']} encontrados")
+    return leads, stats
 
 
 def search_maps(api_key: str, query: str, country: Country, pages: int = 1,
@@ -715,6 +848,9 @@ def generate_leads(
                 continue
             if name_key in exclude_keys or (phone_key and phone_key in exclude_phones):
                 stats["ya_contactados"] += 1
+                seen_names.add(name_key)          # evita recontar sus duplicados
+                if phone_key:
+                    seen_phones.add(phone_key)
                 continue
             if only_with_phone and not lead.phone_e164:
                 stats["sin_telefono"] += 1
@@ -727,6 +863,11 @@ def generate_leads(
 
         if progress:
             progress(index / len(combos) * 0.7, f"{query} · {len(leads)} leads")
+
+    if enrich_web and not HTML_PARSER_AVAILABLE:
+        stats["errores"].append(
+            "Enriquecimiento web omitido: falta beautifulsoup4 en requirements.txt")
+        enrich_web = False
 
     if enrich_web and leads:
         targets = [lead for lead in leads if lead.website][:enrich_limit]
