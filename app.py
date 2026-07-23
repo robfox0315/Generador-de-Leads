@@ -34,6 +34,12 @@ try:
         _MISSING.append("catalog.py")
 except ImportError:
     _MISSING.append("catalog.py")
+try:
+    import osm_provider as _osm
+    if getattr(_osm, "__version__", "0") != APP_VERSION:
+        _MISSING.append("osm_provider.py")
+except ImportError:
+    _MISSING.append("osm_provider.py")
 
 if _MISSING:
     st.set_page_config(page_title="LeadForge", page_icon="⚡")
@@ -296,7 +302,22 @@ def render_results(state_key: str, stats_key: str) -> None:
 # Barra lateral
 # ---------------------------------------------------------------------------
 with st.sidebar:
-    st.markdown('<div class="lf-section">Conexión</div>', unsafe_allow_html=True)
+    st.markdown('<div class="lf-section">Fuente de datos</div>', unsafe_allow_html=True)
+    source_label = st.radio(
+        "Fuente", ["OpenStreetMap · gratis", "Google Maps · más cobertura"],
+        label_visibility="collapsed",
+        captions=["Sin API key ni límites. Menos teléfonos.",
+                  "Requiere API key de SerpApi (250/mes gratis)."])
+    source = "osm" if source_label.startswith("OpenStreetMap") else "google"
+    needs_key = source == "google"
+
+    st.divider()
+    st.markdown('<div class="lf-section">Conexión</div>',
+                unsafe_allow_html=True) if needs_key else None
+
+    if not needs_key:
+        st.markdown('<div class="lf-ok">Modo sin clave activo: puedes buscar ya, '
+                    'sin registrarte en ningún sitio.</div>', unsafe_allow_html=True)
 
     try:
         stored_key = st.secrets.get("SERPAPI_KEY", "")
@@ -304,9 +325,10 @@ with st.sidebar:
         stored_key = ""
 
     api_key = st.text_input("API key de SerpApi", value=stored_key, type="password",
-                            label_visibility="collapsed", placeholder="API key de SerpApi")
+                            label_visibility="collapsed", placeholder="API key de SerpApi",
+                            disabled=not needs_key) if needs_key else ""
 
-    if api_key:
+    if api_key and needs_key:
         valid, reason = validate_api_key(api_key)
         if not valid:
             st.markdown(f'<div class="lf-warn">{reason}</div>', unsafe_allow_html=True)
@@ -331,7 +353,7 @@ with st.sidebar:
             elif account:
                 st.markdown(f'<div class="lf-warn">{account.get("error")}</div>',
                             unsafe_allow_html=True)
-    else:
+    elif needs_key:
         st.caption("Gratis en serpapi.com — 250 búsquedas/mes.")
 
     country_code = st.selectbox("País", list(COUNTRIES.keys()),
@@ -390,7 +412,11 @@ with tab_search:
                                     placeholder="Ej. club de pickleball")
         terms = list(terms) + [t.strip() for t in extra_terms.split(",") if t.strip()]
 
-    estimated = len(set(cities)) * len(set(terms)) * pages
+    estimated = len(set(cities)) * len(set(terms)) * (pages if source == "google" else 1)
+    if source == "osm":
+        st.caption(f"**{len(set(cities))} ciudades × {len(set(terms))} términos** — "
+                   f"OpenStreetMap no consume cuota. Tarda algo más por cortesía "
+                   f"con el servicio (≈1,5 s por consulta).")
     account = st.session_state.get("account") or {}
     left = account.get("left") if account.get("ok") else None
     warn = ""
@@ -398,8 +424,9 @@ with tab_search:
         warn = f"  ·  ⚠️ supera tus {left} búsquedas disponibles"
     elif estimated > max_searches:
         warn = "  ·  ⚠️ supera tu tope, se cortará antes"
-    st.caption(f"Consumo estimado: **{estimated}** búsquedas "
-               f"({len(set(cities))} ciudades × {len(set(terms))} términos × {pages}){warn}")
+    if source == "google":
+        st.caption(f"Consumo estimado: **{estimated}** búsquedas "
+                   f"({len(set(cities))} ciudades × {len(set(terms))} términos × {pages}){warn}")
 
     with st.expander("Mensaje de contacto"):
         st.caption("Variables: " + "  ".join("{" + v + "}" for v in TEMPLATE_VARIABLES))
@@ -451,7 +478,7 @@ with tab_search:
 
     st.write("")
     if st.button("Generar leads", type="primary", use_container_width=True):
-        key_ok, key_reason = validate_api_key(api_key)
+        key_ok, key_reason = (True, "") if source == "osm" else validate_api_key(api_key)
         if not key_ok:
             st.error(key_reason)
         elif not cities or not terms:
@@ -469,7 +496,7 @@ with tab_search:
                     template_extra={"empresa": company, "remitente": sender, "web": site},
                     only_with_phone=only_phone, exclude_keys=exclude_keys,
                     exclude_phones=exclude_phones, max_searches=int(max_searches),
-                    use_cache=use_cache,
+                    use_cache=use_cache, source=source,
                     progress=lambda f, t: bar.progress(min(max(f, 0.0), 1.0), text=t),
                 )
                 bar.empty()

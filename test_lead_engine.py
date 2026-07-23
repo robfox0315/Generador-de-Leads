@@ -355,6 +355,61 @@ def _raises(func, *args, **kwargs) -> bool:
         return True
 
 
+# ---------------------------------------------------------------------------
+# Proveedor sin API key (OpenStreetMap)
+# ---------------------------------------------------------------------------
+
+def test_osm_provider():
+    import osm_provider as osm
+    from unittest.mock import patch
+
+    query = osm.build_query("Sevilla", "club de futbol base")
+    element = {"type": "way", "id": 123456, "center": {"lat": 37.38, "lon": -5.99},
+               "tags": {"name": "CD Deportivo Sevilla", "club": "sport", "sport": "soccer",
+                        "phone": "+34 619 71 98 78", "website": "https://cdsevilla.es",
+                        "contact:email": "info@cdsevilla.es", "addr:street": "Calle Mayor",
+                        "addr:housenumber": "12", "addr:postcode": "41010",
+                        "addr:city": "Sevilla"}}
+    raw = osm.element_to_raw(element)
+    sin_nombre = osm.element_to_raw({"type": "node", "id": 1, "tags": {"sport": "soccer"}})
+
+    results = [
+        check("Genera consulta con el área correcta", 'area["name"="Sevilla"]' in query),
+        check("Traduce fútbol a la etiqueta de OSM", '["sport"="soccer"]' in query),
+        check("Consulta nodos y vías",
+              "node(area.searchArea)" in query and "way(area.searchArea)" in query),
+        check("Término desconocido usa filtros genéricos",
+              osm.filters_for("negocio raro") == osm.DEFAULT_FILTERS),
+        check("Convierte el nombre", raw["title"] == "CD Deportivo Sevilla"),
+        check("Convierte el teléfono", raw["phone"] == "+34 619 71 98 78"),
+        check("Compone la dirección", "41010 Sevilla" in raw["address"]),
+        check("Recupera el email de la ficha", raw["osm_email"] == "info@cdsevilla.es"),
+        check("Genera enlace a OpenStreetMap", "openstreetmap.org/way/123456" in raw["osm_url"]),
+        check("Descarta elementos sin nombre", sin_nombre is None),
+        check("Escapa comillas en el nombre de ciudad",
+              '"' not in osm.build_query('Sev"illa', "club deportivo").split("area[")[1].split("]")[0].replace('"name"="Sevilla"', "")),
+    ]
+
+    # Pipeline completo sin API key
+    with patch.object(osm, "search_osm", return_value=[raw]):
+        leads, stats = engine.generate_leads("", ["Sevilla"], ["club de futbol base"],
+                                             source="osm", enrich_web=False, use_cache=False)
+    results += [
+        check("Funciona sin API key", len(leads) == 1),
+        check("No consume cuota", stats["consumidas"] == 0),
+        check("Deduce la provincia igual que con Maps", leads[0].province == "Sevilla"),
+        check("Aprovecha el email de OSM", leads[0].email == "info@cdsevilla.es"),
+        check("Genera enlace de WhatsApp",
+              leads[0].whatsapp_url.startswith("https://wa.me/34619719878")),
+    ]
+
+    # Con Google sigue exigiendo clave válida
+    results.append(check("Con Google sigue exigiendo API key",
+                         _raises(engine.generate_leads, "clave-mala", ["Sevilla"],
+                                 ["club"], source="google")))
+    return all(results)
+
+
 SUITES = [
     ("Teléfonos multi-país", test_phones),
     ("Clasificación y filtros", test_classification),
@@ -368,6 +423,7 @@ SUITES = [
     ("Pipeline completo (simulado)", test_pipeline),
     ("Enriquecer desde nombres", test_enrich_from_names),
     ("Persistencia y CRM", test_storage),
+    ("Proveedor sin API key (OSM)", test_osm_provider),
 ]
 
 

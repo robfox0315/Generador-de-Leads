@@ -704,7 +704,11 @@ def build_lead(raw: dict, country: Country, query: str) -> Lead | None:
         rating=str(raw.get("rating", "") or ""),
         reviews=str(raw.get("reviews", "") or ""),
         maps_url=("https://www.google.com/maps/place/?q=place_id:" + raw["place_id"])
-        if raw.get("place_id") else "",
+        if raw.get("place_id") else raw.get("osm_url", ""),
+        email=raw.get("osm_email", ""),
+        email_type=("Genérico" if raw.get("osm_email") and
+                    is_role_account(raw["osm_email"]) else
+                    ("Personal" if raw.get("osm_email") else "")),
         query=query,
         size_hint="Sin web (redes)" if not website else "Con web",
     )
@@ -785,12 +789,19 @@ def generate_leads(
     exclude_phones: set[str] | None = None,
     max_searches: int = 200,
     use_cache: bool = True,
+    source: str = "google",
     progress: Callable[[float, str], None] | None = None,
 ) -> tuple[list[Lead], dict]:
-    """Pipeline completo. Devuelve (leads, estadísticas)."""
-    valid, reason = validate_api_key(api_key)
-    if not valid:
-        raise SerpApiError(reason)
+    """
+    Pipeline completo. Devuelve (leads, estadísticas).
+
+    source: "google"  → Google Maps vía SerpApi (requiere API key)
+            "osm"     → OpenStreetMap vía Overpass (gratis, sin clave)
+    """
+    if source == "google":
+        valid, reason = validate_api_key(api_key)
+        if not valid:
+            raise SerpApiError(reason)
     if country_code not in COUNTRIES:
         raise SerpApiError(f"País no soportado: {country_code}")
 
@@ -822,7 +833,16 @@ def generate_leads(
 
         query = f"{sport} {city}"
         try:
-            raw_results, consumed = search_maps(api_key, query, country, pages, use_cache)
+            if source == "osm":
+                from osm_provider import OverpassError, search_osm
+                try:
+                    raw_results = search_osm(city, sport)
+                    consumed = 0            # OpenStreetMap no consume cuota
+                except OverpassError as exc:
+                    raise SerpApiError(str(exc)) from exc
+            else:
+                raw_results, consumed = search_maps(api_key, query, country,
+                                                    pages, use_cache)
         except SerpApiError as exc:
             stats["consultas_fallidas"] += 1
             stats["errores"].append(f"{query}: {exc}")
